@@ -37,6 +37,8 @@ pub(crate) type Responder = fn(&[u8]) -> Option<Vec<u8>>;
 pub(crate) type WriteFailure = fn(&[u8]) -> bool;
 
 pub(crate) struct ScriptedRawHidChannel {
+    vendor_id: u16,
+    product_id: u16,
     incoming_tx: mpsc::UnboundedSender<Vec<u8>>,
     incoming_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<Vec<u8>>>,
     written: Arc<Mutex<Vec<Vec<u8>>>>,
@@ -47,7 +49,7 @@ pub(crate) struct ScriptedRawHidChannel {
 impl ScriptedRawHidChannel {
     /// A channel answering as `responder`'s device.
     pub(crate) fn with_responder(responder: Responder) -> (Self, ScriptedRawHidHandle) {
-        Self::build(responder, None)
+        Self::build(0x046d, 0xb35b, responder, None)
     }
 
     /// The same, except that a write `fails` selects errors at the transport
@@ -58,14 +60,31 @@ impl ScriptedRawHidChannel {
         responder: Responder,
         fails: WriteFailure,
     ) -> (Self, ScriptedRawHidHandle) {
-        Self::build(responder, Some(fails))
+        Self::build(0x046d, 0xb35b, responder, Some(fails))
     }
 
-    fn build(responder: Responder, fails: Option<WriteFailure>) -> (Self, ScriptedRawHidHandle) {
+    /// Custom VID/PID channel with failing writes.
+    pub(crate) fn with_product_id_and_failing_writes(
+        vendor_id: u16,
+        product_id: u16,
+        responder: Responder,
+        fails: WriteFailure,
+    ) -> (Self, ScriptedRawHidHandle) {
+        Self::build(vendor_id, product_id, responder, Some(fails))
+    }
+
+    fn build(
+        vendor_id: u16,
+        product_id: u16,
+        responder: Responder,
+        fails: Option<WriteFailure>,
+    ) -> (Self, ScriptedRawHidHandle) {
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
         let written = Arc::new(Mutex::new(Vec::new()));
         (
             Self {
+                vendor_id,
+                product_id,
                 incoming_tx,
                 incoming_rx: tokio::sync::Mutex::new(incoming_rx),
                 written: Arc::clone(&written),
@@ -80,11 +99,11 @@ impl ScriptedRawHidChannel {
 #[hidpp::async_trait]
 impl RawHidChannel for ScriptedRawHidChannel {
     fn vendor_id(&self) -> u16 {
-        0x046d
+        self.vendor_id
     }
 
     fn product_id(&self) -> u16 {
-        0xb35b
+        self.product_id
     }
 
     async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {

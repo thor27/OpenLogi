@@ -15,7 +15,8 @@ use super::cache::{
 use super::features::ProbedFeatures;
 use super::probe::{
     NodeProbe, ProbeVerdict, assemble_bolt_probe, assemble_unifying_device,
-    parse_codename_unifying, preferred_direct_codename, probe_unifying_slot, unifying_probe_budget,
+    drain_device_arrival_unifying, parse_codename_unifying, preferred_direct_codename,
+    probe_unifying_slot, unifying_probe_budget,
 };
 use super::{
     ChannelCache, Enumerator, ONESHOT_ATTEMPTS, OneShotScan, ScanPass, UNIFYING_CACHED_SLOT_PROBE,
@@ -25,6 +26,7 @@ use crate::channel::scripted::{
     ScriptedBackend, ScriptedNode, ScriptedRawHidChannel, scripted_channel, scripted_node_info,
 };
 use crate::{DIRECT_DEVICE_INDEX, DeviceRoute};
+use hidpp::receiver::unifying::Receiver as UnifyingReceiver;
 
 fn cache_entry(probed_tick: u64) -> Cached {
     Cached {
@@ -352,7 +354,7 @@ fn retiring_node_inventory_expires_after_the_existing_ledger_grace() {
 
     let mut complete = true;
     let mut healthy = true;
-    for _ in 0..3 {
+    for _ in 0..5 {
         assert_eq!(
             settle_unhealthy_node(&mut ledger, &1, &mut complete, &mut healthy),
             Some(expected[0].clone())
@@ -785,4 +787,77 @@ async fn a_non_hidpp_node_leaves_the_tick_healthy() {
         "a node that is not HID++ is not a failure to retry"
     );
     assert!(complete, "nothing was left unchecked");
+}
+
+#[tokio::test]
+async fn drain_device_arrival_unifying_falls_back_on_initial_trigger_failure() {
+    static FAILED_ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    FAILED_ONCE.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    let responder = |request: &[u8]| -> Option<Vec<u8>> {
+        let msg =
+            hidpp::protocol::v10::Message::from(hidpp::channel::HidppMessage::read_raw(request)?);
+        let header = msg.header();
+        let payload = msg.extend_payload();
+
+        if header.device_index == 0xff {
+            if header.sub_id == u8::from(hidpp::protocol::v10::MessageType::GetRegister)
+                && payload[0] == 0x00
+            {
+                // Read notifications register 0x00
+                let mut buf = vec![0u8; hidpp::channel::SHORT_REPORT_LENGTH];
+                hidpp::channel::HidppMessage::from(msg).write_raw(&mut buf);
+                return Some(buf);
+            }
+            if header.sub_id == u8::from(hidpp::protocol::v10::MessageType::SetRegister)
+                && payload[0] == 0x00
+            {
+                // Write notifications register 0x00
+                let mut buf = vec![0u8; hidpp::channel::SHORT_REPORT_LENGTH];
+                hidpp::channel::HidppMessage::from(msg).write_raw(&mut buf);
+                return Some(buf);
+            }
+            if header.sub_id == u8::from(hidpp::protocol::v10::MessageType::SetRegister)
+                && payload[0] == 0x02
+                && payload[1] == 0x02
+            {
+                // Trigger arrival (SetRegister 0x02)
+                let mut buf = vec![0u8; hidpp::channel::SHORT_REPORT_LENGTH];
+                hidpp::channel::HidppMessage::from(msg).write_raw(&mut buf);
+                return Some(buf);
+            }
+        }
+        None
+    };
+
+    let fails = |request: &[u8]| -> bool {
+        let Some(msg) = hidpp::channel::HidppMessage::read_raw(request) else {
+            return false;
+        };
+        let msg = hidpp::protocol::v10::Message::from(msg);
+        let header = msg.header();
+        let payload = msg.extend_payload();
+
+        // Fail the first SetRegister 0x02 write
+        if header.device_index == 0xff
+            && header.sub_id == u8::from(hidpp::protocol::v10::MessageType::SetRegister)
+            && payload[0] == 0x02
+            && payload[1] == 0x02
+            && !FAILED_ONCE.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return true;
+        }
+        false
+    };
+
+    let (raw, _) =
+        ScriptedRawHidChannel::with_product_id_and_failing_writes(0x046d, 0xc52b, responder, fails);
+    let channel = scripted_channel(raw).await;
+    let unifying = UnifyingReceiver::new(channel).expect("recognized as Unifying");
+
+    let connections = drain_device_arrival_unifying(&unifying, 1).await;
+    assert!(
+        connections.is_some(),
+        "fallback after initial trigger failure must succeed"
+    );
 }

@@ -586,7 +586,7 @@ async fn drain_device_arrival(bolt: &BoltReceiver) -> Vec<BoltDeviceConnection> 
 /// list comes from the slot registers), the drain is the only Unifying device
 /// source, so the caller must treat that as a failed probe rather than an
 /// empty receiver.
-async fn drain_device_arrival_unifying(
+pub(super) async fn drain_device_arrival_unifying(
     unifying: &UnifyingReceiver,
     pairing_count: u8,
 ) -> Option<Vec<UnifyingDeviceConnection>> {
@@ -596,28 +596,33 @@ async fn drain_device_arrival_unifying(
     // flag). Ask first: c54d has been observed to answer this trigger while
     // occasionally withholding the ACK for the notification-register setup,
     // which otherwise stalls discovery before it reaches the useful request.
-    if let Err(e) = unifying.trigger_device_arrival().await {
-        debug!(error = ?e, "trigger_device_arrival failed; receiver may report no devices");
-        return None;
-    }
+    let initial_trigger = unifying.trigger_device_arrival().await;
     let mut out = Vec::new();
-    loop {
-        match timeout(ARRIVAL_DRAIN, rx.recv()).await {
-            Ok(Ok(UnifyingEvent::DeviceConnection(connection))) => out.push(connection),
-            Ok(Ok(_)) => {}
-            Ok(Err(_)) | Err(_) => break,
+    if initial_trigger.is_ok() {
+        loop {
+            match timeout(ARRIVAL_DRAIN, rx.recv()).await {
+                Ok(Ok(UnifyingEvent::DeviceConnection(connection))) => out.push(connection),
+                Ok(Ok(_)) => {}
+                Ok(Err(_)) | Err(_) => break,
+            }
         }
-    }
-    // A receiver with no pairings legitimately emits nothing: don't pay a
-    // notification-register round trip and a second drain window for it on
-    // every watcher tick.
-    if !out.is_empty() || pairing_count == 0 {
-        return Some(out);
+        // A receiver with no pairings legitimately emits nothing: don't pay a
+        // notification-register round trip and a second drain window for it on
+        // every watcher tick.
+        if !out.is_empty() || pairing_count == 0 {
+            return Some(out);
+        }
+    } else {
+        debug!(
+            error = ?initial_trigger.err(),
+            "initial trigger_device_arrival failed; attempting fallback with wireless notifications"
+        );
     }
 
     // Classic Unifying receivers only re-broadcast 0x41 arrival events while
     // wireless notifications are on. Fall back to enabling that flag when the
-    // direct trigger produced no device, then retry once on the same listener.
+    // direct trigger produced no device or returned an error, then retry once
+    // on the same listener.
     if let Err(error) = unifying.set_wireless_notifications(true).await {
         // A register write the receiver stopped ACK'ing is "couldn't check",
         // exactly like a failed trigger: settle it as a failed probe so the
@@ -627,6 +632,7 @@ async fn drain_device_arrival_unifying(
         debug!(?error, "enable wireless notifications failed");
         return None;
     }
+    tokio::time::sleep(crate::inventory::UNIFYING_NOTIFICATION_RETRY_DELAY).await;
     if let Err(error) = unifying.trigger_device_arrival().await {
         debug!(?error, "arrival retry after enabling notifications failed");
         return None;

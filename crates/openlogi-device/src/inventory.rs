@@ -442,6 +442,10 @@ const ONESHOT_ATTEMPTS: u8 = 4;
 /// asleep device, so a short pause lets the next attempt read it cleanly.
 const ONESHOT_RETRY_DELAY: Duration = Duration::from_millis(300);
 
+/// Pause after enabling Unifying wireless notifications on a receiver before
+/// retrying the arrival trigger, letting the endpoint settle.
+pub(super) const UNIFYING_NOTIFICATION_RETRY_DELAY: Duration = Duration::from_millis(50);
+
 /// Nodes that remain valid for this tick: everything the OS enumerated plus
 /// cached channels whose open transport still reports a live connection.
 fn retained_nodes<K>(

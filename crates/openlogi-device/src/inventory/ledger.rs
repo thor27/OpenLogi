@@ -27,9 +27,10 @@ use tracing::{debug, warn};
 /// Ticks a node's last-good inventory keeps being served while its probe
 /// fails. Past this the live (partial or empty) result is surfaced, so a
 /// receiver that is genuinely wedged eventually shows the truth instead of an
-/// ever-staler snapshot. Mirrors the probe cache's `CACHE_MISS_GRACE`, so a
-/// node recovers with its memoized probes still warm.
-const NODE_MISS_GRACE: u8 = 3;
+/// ever-staler snapshot. Sized above [`CHANNEL_EVICT_AFTER`] plus the channel
+/// drain and reopen transition so a freshly opened channel gets multiple probe
+/// attempts before discarding the snapshot.
+const NODE_MISS_GRACE: u8 = 5;
 
 /// Consecutive failed probes after which the node's cached channel should be
 /// dropped and reopened. A channel whose read loop parked on a `Disconnected`
